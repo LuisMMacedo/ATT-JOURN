@@ -5,8 +5,13 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { createClient } from '@supabase/supabase-js';
 
-type Screen = 'SPLASH' | 'ONBOARDING' | 'TODAY' | 'RUN' | 'WORKOUT' | 'SLEEP' | 'NUTRITION' | 'ARCHIVE' | 'STREAK';
+const SUPABASE_URL = 'https://kzeeujqyxzgdggxettdu.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_A2uSS51a_Maz1-Z-2YXL6g_d0Qnhn_I';
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+type Screen = 'SPLASH' | 'AUTH' | 'ONBOARDING' | 'TODAY' | 'RUN' | 'WORKOUT' | 'SLEEP' | 'NUTRITION' | 'ARCHIVE' | 'REPORT' | 'STREAK';
 
 interface DayData {
   run: { km: string; timeMin: string; timeSec: string; pace: string; feeling: number; note: string };
@@ -16,14 +21,14 @@ interface DayData {
 }
 
 interface AppData {
-  user: { name: string; weight: string; goal: string };
+  user: { name: string; weight: string; meta_streak: string };
   days: Record<string, DayData>;
   streak: number;
   record: number;
 }
 
 const INITIAL_DATA: AppData = {
-  user: { name: '', weight: '', goal: '' },
+  user: { name: '', weight: '', meta_streak: '' },
   days: {},
   streak: 0,
   record: 0
@@ -42,13 +47,16 @@ const STREAK_PHRASES: Record<number, string> = {
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('SPLASH');
-  const [data, setData] = useState<AppData>(() => {
-    const saved = localStorage.getItem('athletic_journal_data');
-    return saved ? JSON.parse(saved) : INITIAL_DATA;
-  });
+  const [user, setUser] = useState<any>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [data, setData] = useState<AppData>(INITIAL_DATA);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 });
   const [todayDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [reportWeekOffset, setReportWeekOffset] = useState(0);
 
   // Custom Cursor
   useEffect(() => {
@@ -59,22 +67,124 @@ export default function App() {
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
-  // Persistence
+  // Auth Listener
   useEffect(() => {
-    localStorage.setItem('athletic_journal_data', JSON.stringify(data));
-  }, [data]);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Fetch Data from Supabase
+  useEffect(() => {
+    if (user) {
+      const fetchData = async () => {
+        const { data: registros, error } = await supabase
+          .from('registros')
+          .select('*')
+          .eq('user_id', user.id);
+
+        if (registros) {
+          const days: Record<string, DayData> = {};
+          registros.forEach((r: any) => {
+            days[r.data] = {
+              run: { 
+                km: r.corrida_km?.toString() || '', 
+                timeMin: r.corrida_tempo?.split(':')[0] || '', 
+                timeSec: r.corrida_tempo?.split(':')[1] || '', 
+                pace: r.corrida_pace || '0:00', 
+                feeling: r.corrida_sensacao || 0, 
+                note: r.corrida_nota || '' 
+              },
+              workout: { 
+                type: r.treino_tipo || '', 
+                duration: r.treino_duracao?.toString() || '', 
+                intensity: r.treino_intensidade || 0, 
+                exercises: r.treino_exercicios || '', 
+                note: r.treino_nota || '' 
+              },
+              sleep: { 
+                bed: r.sono_dormiu || '23:00', 
+                wake: r.sono_acordou || '07:00', 
+                duration: r.sono_duracao?.toString() || '8:00', 
+                quality: r.sono_qualidade || 0, 
+                note: r.sono_nota || '' 
+              },
+              nutrition: { 
+                water: parseFloat(r.alimentacao_hidratacao) || 0, 
+                meals: [r.alimentacao_refeicao1 || '', r.alimentacao_refeicao2 || '', r.alimentacao_refeicao3 || ''], 
+                rating: r.alimentacao_avaliacao || 0 
+              }
+            };
+          });
+          
+          setData(prev => ({
+            ...prev,
+            user: {
+              name: user.user_metadata?.name || '',
+              weight: user.user_metadata?.weight || '',
+              meta_streak: user.user_metadata?.meta_streak || ''
+            },
+            days
+          }));
+        }
+      };
+      fetchData();
+    }
+  }, [user]);
 
   // Splash Screen
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (!data.user.name) {
+      if (!user) {
+        setScreen('AUTH');
+      } else if (!user.user_metadata?.name) {
         setScreen('ONBOARDING');
       } else {
         setScreen('TODAY');
       }
     }, 1500);
     return () => clearTimeout(timer);
-  }, [data.user.name]);
+  }, [user]);
+
+  const handleAuth = async () => {
+    setAuthError('');
+    try {
+      if (authMode === 'login') {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail,
+          password: authPassword,
+        });
+        if (error) throw error;
+      }
+    } catch (err: any) {
+      setAuthError(err.message.toUpperCase());
+    }
+  };
+
+  const finishOnboarding = async () => {
+    if (user) {
+      const { error } = await supabase.auth.updateUser({
+        data: { 
+          name: data.user.name, 
+          weight: data.user.weight, 
+          meta_streak: data.user.meta_streak 
+        }
+      });
+      if (!error) setScreen('TODAY');
+    }
+  };
 
   const getDayData = (date: string): DayData => {
     return data.days[date] || {
@@ -86,13 +196,54 @@ export default function App() {
   };
 
   const updateDayData = (date: string, updates: Partial<DayData>) => {
+    const updatedDay = { ...getDayData(date), ...updates };
     setData(prev => ({
       ...prev,
       days: {
         ...prev.days,
-        [date]: { ...getDayData(date), ...updates }
+        [date]: updatedDay
       }
     }));
+  };
+
+  const syncDayData = async (date: string) => {
+    if (user) {
+      const updatedDay = getDayData(date);
+      const payload = {
+        user_id: user.id,
+        data: date,
+        corrida_km: parseFloat(updatedDay.run.km) || null,
+        corrida_tempo: `${updatedDay.run.timeMin}:${updatedDay.run.timeSec}`,
+        corrida_pace: updatedDay.run.pace,
+        corrida_sensacao: updatedDay.run.feeling,
+        corrida_nota: updatedDay.run.note,
+        treino_tipo: updatedDay.workout.type,
+        treino_duracao: parseInt(updatedDay.workout.duration) || null,
+        treino_intensidade: updatedDay.workout.intensity,
+        treino_exercicios: updatedDay.workout.exercises,
+        treino_nota: updatedDay.workout.note,
+        sono_dormiu: updatedDay.sleep.bed,
+        sono_acordou: updatedDay.sleep.wake,
+        sono_duracao: parseFloat(updatedDay.sleep.duration) || null,
+        sono_qualidade: updatedDay.sleep.quality,
+        sono_nota: updatedDay.sleep.note,
+        alimentacao_hidratacao: updatedDay.nutrition.water,
+        alimentacao_refeicao1: updatedDay.nutrition.meals[0],
+        alimentacao_refeicao2: updatedDay.nutrition.meals[1],
+        alimentacao_refeicao3: updatedDay.nutrition.meals[2],
+        alimentacao_avaliacao: updatedDay.nutrition.rating
+      };
+
+      await supabase.from('registros').upsert(payload);
+    }
+  };
+
+  const getWeekNumber = (d: Date) => {
+    const date = new Date(d.getTime());
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
+    const week1 = new Date(date.getFullYear(), 0, 4);
+    return 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
   };
 
   const currentDay = getDayData(todayDate);
@@ -170,7 +321,7 @@ export default function App() {
 
   const NavDots = () => (
     <div className="fixed right-4 md:right-8 top-1/2 -translate-y-1/2 flex flex-col gap-3 md:gap-4 z-50">
-      {(['TODAY', 'RUN', 'WORKOUT', 'SLEEP', 'NUTRITION', 'ARCHIVE', 'STREAK'] as Screen[]).map(s => (
+      {(['TODAY', 'RUN', 'WORKOUT', 'SLEEP', 'NUTRITION', 'ARCHIVE', 'REPORT', 'STREAK'] as Screen[]).map(s => (
         <button
           key={s}
           onClick={() => setScreen(s)}
@@ -242,16 +393,59 @@ export default function App() {
                   autoFocus
                   className="font-mono text-4xl md:text-8xl text-center w-full"
                   placeholder="00"
-                  value={data.user.goal}
-                  onChange={e => setData(prev => ({ ...prev, user: { ...prev.user, goal: e.target.value } }))}
-                  onKeyDown={e => e.key === 'Enter' && setScreen('TODAY')}
+                  value={data.user.meta_streak}
+                  onChange={e => setData(prev => ({ ...prev, user: { ...prev.user, meta_streak: e.target.value } }))}
+                  onKeyDown={e => e.key === 'Enter' && finishOnboarding()}
                 />
               </motion.div>
             )}
           </motion.div>
         )}
 
-        {screen !== 'SPLASH' && screen !== 'ONBOARDING' && (
+        {screen === 'AUTH' && (
+          <motion.div
+            key="auth"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 flex flex-col items-center justify-center p-12 text-center"
+          >
+            <div className="w-full max-w-sm">
+              <h2 className="font-display text-4xl md:text-6xl mb-12 uppercase">ATHLETIC JOURNAL</h2>
+              <div className="space-y-6">
+                <input
+                  type="email"
+                  className="w-full bg-transparent border-b border-white/20 py-4 font-sans text-xl placeholder:opacity-20 text-center outline-none"
+                  placeholder="EMAIL"
+                  value={authEmail}
+                  onChange={e => setAuthEmail(e.target.value)}
+                />
+                <input
+                  type="password"
+                  className="w-full bg-transparent border-b border-white/20 py-4 font-sans text-xl placeholder:opacity-20 text-center outline-none"
+                  placeholder="SENHA"
+                  value={authPassword}
+                  onChange={e => setAuthPassword(e.target.value)}
+                />
+                <button
+                  onClick={handleAuth}
+                  className="font-display text-2xl md:text-4xl mt-8 uppercase hover:opacity-70 transition-opacity"
+                >
+                  {authMode === 'login' ? 'ENTRAR' : 'CADASTRAR'}
+                </button>
+                {authError && <div className="text-[10px] tracking-widest opacity-70 mt-4">{authError}</div>}
+                <button
+                  onClick={() => setAuthMode(prev => prev === 'login' ? 'signup' : 'login')}
+                  className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-30 mt-12 block w-full"
+                >
+                  {authMode === 'login' ? 'PRIMEIRO ACESSO' : 'JÁ TENHO CONTA'}
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {screen !== 'SPLASH' && screen !== 'ONBOARDING' && screen !== 'AUTH' && (
           <motion.main
             key={screen}
             initial={{ opacity: 0 }}
@@ -339,6 +533,7 @@ export default function App() {
                     placeholder="0.0"
                     value={currentDay.run.km}
                     onChange={e => updateDayData(todayDate, { run: { ...currentDay.run, km: e.target.value } })}
+                    onBlur={() => syncDayData(todayDate)}
                   />
                   <span className="font-display text-2xl md:text-4xl uppercase">KM</span>
                 </div>
@@ -352,6 +547,7 @@ export default function App() {
                         placeholder="00"
                         value={currentDay.run.timeMin}
                         onChange={e => updateDayData(todayDate, { run: { ...currentDay.run, timeMin: e.target.value } })}
+                        onBlur={() => syncDayData(todayDate)}
                       />
                       <span>:</span>
                       <input
@@ -359,6 +555,7 @@ export default function App() {
                         placeholder="00"
                         value={currentDay.run.timeSec}
                         onChange={e => updateDayData(todayDate, { run: { ...currentDay.run, timeSec: e.target.value } })}
+                        onBlur={() => syncDayData(todayDate)}
                       />
                     </div>
                   </div>
@@ -370,7 +567,10 @@ export default function App() {
 
                 <div className="mb-12">
                   <label className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-50 mb-4 block">SENSAÇÃO</label>
-                  {renderDots(5, currentDay.run.feeling, (i) => updateDayData(todayDate, { run: { ...currentDay.run, feeling: i } }))}
+                  {renderDots(5, currentDay.run.feeling, (i) => {
+                    updateDayData(todayDate, { run: { ...currentDay.run, feeling: i } });
+                    syncDayData(todayDate);
+                  })}
                 </div>
 
                 <textarea
@@ -379,6 +579,7 @@ export default function App() {
                   rows={1}
                   value={currentDay.run.note}
                   onChange={e => updateDayData(todayDate, { run: { ...currentDay.run, note: e.target.value } })}
+                  onBlur={() => syncDayData(todayDate)}
                 />
               </div>
             )}
@@ -391,7 +592,10 @@ export default function App() {
                   {['FORÇA', 'HIIT', 'MOBILIDADE', 'YOGA', 'OUTRO'].map(t => (
                     <button
                       key={t}
-                      onClick={() => updateDayData(todayDate, { workout: { ...currentDay.workout, type: t } })}
+                      onClick={() => {
+                        updateDayData(todayDate, { workout: { ...currentDay.workout, type: t } });
+                        syncDayData(todayDate);
+                      }}
                       className="flex items-center gap-3 group"
                     >
                       <div className={`w-3 h-3 rounded-full border border-white transition-all ${currentDay.workout.type === t ? 'bg-white scale-125' : 'bg-transparent'}`} />
@@ -408,12 +612,16 @@ export default function App() {
                       placeholder="00"
                       value={currentDay.workout.duration}
                       onChange={e => updateDayData(todayDate, { workout: { ...currentDay.workout, duration: e.target.value } })}
+                      onBlur={() => syncDayData(todayDate)}
                     />
                   </div>
                   <div>
                     <label className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-50 mb-4 block">INTENSIDADE</label>
                     <div className="mt-8">
-                      {renderDots(5, currentDay.workout.intensity, (i) => updateDayData(todayDate, { workout: { ...currentDay.workout, intensity: i } }))}
+                      {renderDots(5, currentDay.workout.intensity, (i) => {
+                        updateDayData(todayDate, { workout: { ...currentDay.workout, intensity: i } });
+                        syncDayData(todayDate);
+                      })}
                     </div>
                   </div>
                 </div>
@@ -426,6 +634,7 @@ export default function App() {
                     rows={3}
                     value={currentDay.workout.exercises}
                     onChange={e => updateDayData(todayDate, { workout: { ...currentDay.workout, exercises: e.target.value } })}
+                    onBlur={() => syncDayData(todayDate)}
                   />
                 </div>
 
@@ -435,6 +644,7 @@ export default function App() {
                   rows={1}
                   value={currentDay.workout.note}
                   onChange={e => updateDayData(todayDate, { workout: { ...currentDay.workout, note: e.target.value } })}
+                  onBlur={() => syncDayData(todayDate)}
                 />
               </div>
             )}
@@ -451,6 +661,7 @@ export default function App() {
                       className="font-mono text-5xl md:text-6xl"
                       value={currentDay.sleep.bed}
                       onChange={e => updateDayData(todayDate, { sleep: { ...currentDay.sleep, bed: e.target.value } })}
+                      onBlur={() => syncDayData(todayDate)}
                     />
                   </div>
                   
@@ -466,13 +677,17 @@ export default function App() {
                       className="font-mono text-5xl md:text-6xl"
                       value={currentDay.sleep.wake}
                       onChange={e => updateDayData(todayDate, { sleep: { ...currentDay.sleep, wake: e.target.value } })}
+                      onBlur={() => syncDayData(todayDate)}
                     />
                   </div>
                 </div>
 
                 <div className="mb-12 flex flex-col items-center">
-                  <label className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-50 mb-8 block">QUALIDADE</label>
-                  {renderDots(5, currentDay.sleep.quality, (i) => updateDayData(todayDate, { sleep: { ...currentDay.sleep, quality: i } }))}
+                  <label className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-50 mb-4 block">QUALIDADE</label>
+                  {renderDots(5, currentDay.sleep.quality, (i) => {
+                    updateDayData(todayDate, { sleep: { ...currentDay.sleep, quality: i } });
+                    syncDayData(todayDate);
+                  })}
                 </div>
 
                 <textarea
@@ -481,6 +696,7 @@ export default function App() {
                   rows={1}
                   value={currentDay.sleep.note}
                   onChange={e => updateDayData(todayDate, { sleep: { ...currentDay.sleep, note: e.target.value } })}
+                  onBlur={() => syncDayData(todayDate)}
                 />
               </div>
             )}
@@ -492,7 +708,11 @@ export default function App() {
                 <div className="flex items-center justify-between mb-12 md:mb-24 glass p-8 md:p-12">
                   <button 
                     className="font-mono text-4xl md:text-6xl opacity-30 hover:opacity-100 transition-opacity"
-                    onClick={() => updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, water: Math.max(0, currentDay.nutrition.water - 0.25) } })}
+                    onClick={() => {
+                      const newVal = Math.max(0, currentDay.nutrition.water - 0.25);
+                      updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, water: newVal } });
+                      syncDayData(todayDate);
+                    }}
                   >—</button>
                   <div className="text-center">
                     <span className="font-mono text-7xl md:text-9xl">{currentDay.nutrition.water.toFixed(1)}</span>
@@ -500,7 +720,11 @@ export default function App() {
                   </div>
                   <button 
                     className="font-mono text-4xl md:text-6xl opacity-30 hover:opacity-100 transition-opacity"
-                    onClick={() => updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, water: currentDay.nutrition.water + 0.25 } })}
+                    onClick={() => {
+                      const newVal = currentDay.nutrition.water + 0.25;
+                      updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, water: newVal } });
+                      syncDayData(todayDate);
+                    }}
                   >+</button>
                 </div>
 
@@ -518,6 +742,7 @@ export default function App() {
                           newMeals[i] = e.target.value;
                           updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, meals: newMeals } });
                         }}
+                        onBlur={() => syncDayData(todayDate)}
                       />
                     </div>
                   ))}
@@ -525,7 +750,10 @@ export default function App() {
 
                 <div className="flex flex-col items-center">
                   <label className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-50 mb-8 block">AVALIAÇÃO DO DIA</label>
-                  {renderDots(5, currentDay.nutrition.rating, (i) => updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, rating: i } }))}
+                  {renderDots(5, currentDay.nutrition.rating, (i) => {
+                    updateDayData(todayDate, { nutrition: { ...currentDay.nutrition, rating: i } });
+                    syncDayData(todayDate);
+                  })}
                 </div>
               </div>
             )}
@@ -571,6 +799,77 @@ export default function App() {
                           ) : (
                             <div className="font-mono text-[9px] opacity-30 italic">SEM REGISTROS</div>
                           )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {screen === 'REPORT' && (
+              <div className="max-w-6xl mx-auto">
+                <header className="flex flex-col md:flex-row justify-between items-baseline mb-16 gap-4">
+                  <h1 className="font-display text-4xl md:text-6xl uppercase">
+                    SEMANA {getWeekNumber(new Date(new Date().getTime() - reportWeekOffset * 7 * 24 * 60 * 60 * 1000))} · {new Date(new Date().getTime() - reportWeekOffset * 7 * 24 * 60 * 60 * 1000).toLocaleDateString('pt-BR', { month: 'short' }).toUpperCase()} {new Date(new Date().getTime() - reportWeekOffset * 7 * 24 * 60 * 60 * 1000).getFullYear()}
+                  </h1>
+                  <div className="flex gap-8 font-sans text-[10px] tracking-[0.3em] opacity-50">
+                    <button onClick={() => setReportWeekOffset(prev => prev + 1)}>← semana anterior</button>
+                    <button onClick={() => setReportWeekOffset(prev => prev - 1)}>semana seguinte →</button>
+                  </div>
+                </header>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-8">
+                  {['CORRIDA', 'TREINO', 'SONO', 'ALIMENTAÇÃO'].map(pilar => {
+                    const getPilarData = (offset: number) => {
+                      const now = new Date();
+                      const start = new Date(now.setDate(now.getDate() - now.getDay() - (offset * 7)));
+                      const weekDates = Array.from({ length: 7 }).map((_, i) => {
+                        const d = new Date(start);
+                        d.setDate(d.getDate() + i);
+                        return d.toISOString().split('T')[0];
+                      });
+
+                      const weekDays = weekDates.map(d => data.days[d]);
+                      let avg = 0;
+                      let unit = '';
+                      
+                      if (pilar === 'CORRIDA') {
+                        avg = weekDays.reduce((acc, d) => acc + (parseFloat(d?.run.km) || 0), 0) / 7;
+                        unit = 'KM';
+                      } else if (pilar === 'TREINO') {
+                        avg = weekDays.reduce((acc, d) => acc + (parseInt(d?.workout.duration) || 0), 0) / 7;
+                        unit = 'MIN';
+                      } else if (pilar === 'SONO') {
+                        avg = weekDays.reduce((acc, d) => acc + (parseFloat(d?.sleep.duration) || 0), 0) / 7;
+                        unit = 'H';
+                      } else {
+                        avg = weekDays.reduce((acc, d) => acc + (d?.nutrition.water || 0), 0) / 7;
+                        unit = 'L';
+                      }
+
+                      return { avg, weekDays, unit };
+                    };
+
+                    const current = getPilarData(reportWeekOffset);
+                    const previous = getPilarData(reportWeekOffset + 1);
+                    const diff = current.avg - previous.avg;
+
+                    return (
+                      <div key={pilar} className="glass p-4 md:p-8 flex flex-col justify-between min-h-[250px] md:min-h-[300px]">
+                        <div>
+                          <span className="font-sans text-[10px] tracking-[0.3em] uppercase opacity-50 font-light">{pilar}</span>
+                          <div className="flex gap-1.5 mt-4">
+                            {current.weekDays.map((d, i) => (
+                              <div key={i} className={`w-1.5 h-1.5 rounded-full ${d ? 'bg-white' : 'border border-white/20'}`} />
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="font-mono text-2xl md:text-4xl mb-2">{current.avg.toFixed(1)} {current.unit}</div>
+                          <div className={`font-mono text-[9px] md:text-[10px] ${diff >= 0 ? 'opacity-50' : 'opacity-30'}`}>
+                            {diff >= 0 ? '+' : ''}{diff.toFixed(1)} {current.unit} VS SEMANA ANTERIOR
+                          </div>
                         </div>
                       </div>
                     );
